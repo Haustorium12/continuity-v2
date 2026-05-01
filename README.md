@@ -68,7 +68,19 @@ The "I told you this two weeks ago" problem disappears. The episodic record was 
 
 ## Status
 
-Pre-build. README first.
+Stage 1 built. 854 sessions / 71,135 turns indexed against `~/.claude/projects/`.
+
+```
+python index.py             # build / update DB
+python stats.py             # health + recent sessions
+python search.py "<query>"  # FTS5 search across every session
+python recall.py <id>       # full or sliced session by id
+
+# FTS5 quoting note: hyphenated/numeric tokens need double quotes
+#   python search.py '"gold-402" distribution' --project C--dev
+```
+
+DB lives at `data/continuity.db` (gitignored).
 
 ## License
 
