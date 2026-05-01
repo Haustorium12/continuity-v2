@@ -68,21 +68,22 @@ The "I told you this two weeks ago" problem disappears. The episodic record was 
 
 ## Status
 
-Stage 1 built. 854 sessions / 71,135 turns indexed against `~/.claude/projects/`.
+**Stage 1 + Stage 2 complete.** 873 sessions / 72,254 turns indexed against `~/.claude/projects/`. DB: 49.4 MB.
 
 ```
-python index.py             # build / update DB
+python index.py             # build / update DB (incremental -- skips unchanged files)
 python stats.py             # health + recent sessions
 python search.py "<query>"  # FTS5 search across every session
 python recall.py <id>       # full or sliced session by id
 
-# FTS5 quoting note: hyphenated/numeric tokens need double quotes
-#   python search.py '"gold-402" distribution' --project C--dev
+# FTS5 quoting note: hyphenated/numeric tokens MUST be double-quoted
+#   python search.py '"memory-v4" wave propagation' --project C--dev
+#   python search.py '"gold-402" distribution'
 ```
 
-DB lives at `data/continuity.db` (gitignored).
+DB lives at `data/continuity.db` (gitignored). Run `python index.py` periodically or after long sessions to keep it fresh — it only re-indexes files whose mtime changed.
 
-### Stage 2 built -- MCP server
+### Stage 2 -- MCP server
 
 `mcp_server.py` exposes the index as a stdio MCP server. Add to `~/.claude/settings.json`:
 
@@ -99,9 +100,19 @@ Tools exposed:
 - `search_sessions(query, limit=10, project=None)` -- FTS5 search with snippets
 - `recall_session(session_id, idx_from=None, idx_to=None)` -- full or sliced replay
 - `recent_sessions(n=10, project=None)` -- list recent sessions
-- `index_stats()` -- DB health summary
+- `index_stats()` -- DB health and size
 
 Restart Claude Code to load the server.
+
+### First production session (2026-04-30)
+
+The first real use of v2 immediately proved the concept. In a single session the index enabled:
+
+- Full Saranna project timeline reconstruction from January 2026 forward (GitHub archaeology, vault origins, SBE V3 build history)
+- Recalled the exact conversation where `memory-v4-core` was named and explained its diesel engine architecture
+- Cross-session continuity through compaction -- context loss became a cache miss, not a dead end
+
+The FTS5 quoting fix (wrap hyphenated tokens in double quotes) was the only rough edge hit in production.
 
 ## License
 

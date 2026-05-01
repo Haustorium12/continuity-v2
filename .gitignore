@@ -35,3 +35,6 @@ logs/
 # Env
 .env
 .env.local
+
+# Dev utilities (machine-specific paths, not for distribution)
+mcp_server_debug.py
