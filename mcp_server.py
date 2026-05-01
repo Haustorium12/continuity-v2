@@ -37,8 +37,8 @@ def _connect():
 
 
 @mcp.tool()
-def search_sessions(query: str, limit: int = 10, project: str | None = None):
-    """Full-text search across every Claude Code session ever recorded.
+def search_sessions(query: str, limit: int = 10, project: str | None = None, source: str | None = None):
+    """Full-text search across Claude Code sessions AND claude.ai chat conversations.
 
     Uses SQLite FTS5. Supports AND/OR/NOT, quoted phrases, prefix* matching.
     Hyphenated or numeric tokens MUST be double-quoted (e.g. '"gold-402"').
@@ -46,7 +46,10 @@ def search_sessions(query: str, limit: int = 10, project: str | None = None):
     Args:
         query: FTS5 query string.
         limit: Max results (default 10).
-        project: Optional substring filter on project name (e.g. "C--dev").
+        project: Optional substring filter on project name (e.g. "C--dev",
+                 "chat.claude.ai").
+        source: Optional filter -- "code" for Claude Code sessions only,
+                "chat" for claude.ai conversations only. Omit for both.
 
     Returns:
         Plain-text list of matches: timestamp, role, project, ai_title,
@@ -67,6 +70,9 @@ def search_sessions(query: str, limit: int = 10, project: str | None = None):
     if project:
         sql += " AND s.project LIKE ?"
         params.append(f"%{project}%")
+    if source:
+        sql += " AND s.source = ?"
+        params.append(source)
     sql += " ORDER BY rank LIMIT ?"
     params.append(limit)
 
@@ -146,25 +152,34 @@ def recall_session(
 
 
 @mcp.tool()
-def recent_sessions(n: int = 10, project: str | None = None):
-    """List the N most recent sessions, optionally filtered by project.
+def recent_sessions(n: int = 10, project: str | None = None, source: str | None = None):
+    """List the N most recent sessions across Claude Code and claude.ai chat.
 
     Args:
         n: Number of sessions to return (default 10).
-        project: Optional substring filter on project name.
+        project: Optional substring filter on project name (e.g. "C--dev",
+                 "chat.claude.ai").
+        source: Optional filter -- "code" for Claude Code only,
+                "chat" for claude.ai only. Omit for both.
 
     Returns:
-        Plain-text list: timestamp, turn count, id prefix, project, title.
+        Plain-text list: timestamp, turn count, id prefix, source, project, title.
     """
     conn = _connect()
     sql = (
-        "SELECT id, ai_title, project, started_at, turn_count "
+        "SELECT id, ai_title, project, started_at, turn_count, source "
         "FROM sessions"
     )
     params: list = []
+    clauses: list = []
     if project:
-        sql += " WHERE project LIKE ?"
+        clauses.append("project LIKE ?")
         params.append(f"%{project}%")
+    if source:
+        clauses.append("source = ?")
+        params.append(source)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY started_at DESC LIMIT ?"
     params.append(n)
 
@@ -176,8 +191,9 @@ def recent_sessions(n: int = 10, project: str | None = None):
     for r in rows:
         ts = (r["started_at"] or "")[:19].replace("T", " ")
         title = (r["ai_title"] or "(no title)")[:60]
+        src = r["source"] or "code"
         out.append(
-            f"{ts}  {r['turn_count']:4d}t  {r['id'][:8]}  [{r['project']}]  {title}"
+            f"{ts}  {r['turn_count']:4d}t  {r['id'][:8]}  [{src}]  [{r['project']}]  {title}"
         )
     return "\n".join(out)
 
@@ -188,15 +204,21 @@ def index_stats():
     conn = _connect()
     s = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
     t = conn.execute("SELECT COUNT(*) AS n FROM turns").fetchone()["n"]
+    code_s = conn.execute(
+        "SELECT COUNT(*) AS n FROM sessions WHERE source = 'code' OR source IS NULL"
+    ).fetchone()["n"]
+    chat_s = conn.execute(
+        "SELECT COUNT(*) AS n FROM sessions WHERE source = 'chat'"
+    ).fetchone()["n"]
     earliest = conn.execute("SELECT MIN(started_at) AS m FROM sessions").fetchone()["m"]
     latest = conn.execute("SELECT MAX(ended_at) AS m FROM sessions").fetchone()["m"]
     size_mb = DB_PATH.stat().st_size / (1024 * 1024)
     return (
-        f"DB:       {DB_PATH} ({size_mb:.1f} MB)\n"
-        f"Sessions: {s}\n"
-        f"Turns:    {t}\n"
-        f"Earliest: {earliest}\n"
-        f"Latest:   {latest}"
+        f"DB:            {DB_PATH} ({size_mb:.1f} MB)\n"
+        f"Sessions:      {s} (code: {code_s}, chat: {chat_s})\n"
+        f"Turns:         {t}\n"
+        f"Earliest:      {earliest}\n"
+        f"Latest:        {latest}"
     )
 
 
