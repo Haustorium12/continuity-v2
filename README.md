@@ -104,15 +104,6 @@ Tools exposed:
 
 Restart Claude Code to load the server.
 
-### First production session (2026-04-30)
-
-The first real use of v2 immediately proved the concept. In a single session the index enabled:
-
-- Full Saranna project timeline reconstruction from January 2026 forward (GitHub archaeology, vault origins, SBE V3 build history)
-- Recalled the exact conversation where `memory-v4-core` was named and explained its diesel engine architecture
-- Cross-session continuity through compaction -- context loss became a cache miss, not a dead end
-
-The FTS5 quoting fix (wrap hyphenated tokens in double quotes) was the only rough edge hit in production.
 
 ## License
 
