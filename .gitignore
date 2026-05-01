@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Build output
+build/
+dist/
+
+# Local data (NEVER commit JSONLs or extracted session content)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+sessions/
+extracted/
+*.jsonl
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Env
+.env
+.env.local
