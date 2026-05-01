@@ -82,6 +82,27 @@ python recall.py <id>       # full or sliced session by id
 
 DB lives at `data/continuity.db` (gitignored).
 
+### Stage 2 built -- MCP server
+
+`mcp_server.py` exposes the index as a stdio MCP server. Add to `~/.claude/settings.json`:
+
+```json
+"continuity-v2": {
+  "command": "C:\\Python314\\python.exe",
+  "args": ["C:\\dev\\continuity-v2\\mcp_server.py"],
+  "env": { "PYTHONIOENCODING": "utf-8" }
+}
+```
+
+Tools exposed:
+
+- `search_sessions(query, limit=10, project=None)` -- FTS5 search with snippets
+- `recall_session(session_id, idx_from=None, idx_to=None)` -- full or sliced replay
+- `recent_sessions(n=10, project=None)` -- list recent sessions
+- `index_stats()` -- DB health summary
+
+Restart Claude Code to load the server.
+
 ## License
 
 MIT — same as continuity v1.
