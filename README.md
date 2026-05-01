@@ -68,20 +68,27 @@ The "I told you this two weeks ago" problem disappears. The episodic record was 
 
 ## Status
 
-**Stage 1 + Stage 2 complete.** 873 sessions / 72,254 turns indexed against `~/.claude/projects/`. DB: 49.4 MB.
+**Stage 1 + Stage 2 complete.** 1,026 sessions / 76,010 turns. DB: 57.8 MB.
+
+Two sources in one DB:
+- **Claude Code sessions** -- JSONL files under `~/.claude/projects/`
+- **claude.ai chat conversations** -- Anthropic data export (`conversations.json`)
 
 ```
-python index.py             # build / update DB (incremental -- skips unchanged files)
-python stats.py             # health + recent sessions
-python search.py "<query>"  # FTS5 search across every session
-python recall.py <id>       # full or sliced session by id
+python index.py                              # index Claude Code sessions (incremental)
+python chat_index.py <path/conversations.json>  # index claude.ai chat export (incremental)
+python stats.py                              # health + recent sessions
+python search.py "<query>"                   # FTS5 search across all sessions
+python recall.py <id>                        # full or sliced session by id
 
 # FTS5 quoting note: hyphenated/numeric tokens MUST be double-quoted
 #   python search.py '"memory-v4" wave propagation' --project C--dev
 #   python search.py '"gold-402" distribution'
 ```
 
-DB lives at `data/continuity.db` (gitignored). Run `python index.py` periodically or after long sessions to keep it fresh — it only re-indexes files whose mtime changed.
+DB lives at `data/continuity.db` (gitignored).
+
+To get your claude.ai chat export: claude.ai -> Settings -> Export data.
 
 ### Stage 2 -- MCP server
 
@@ -97,10 +104,12 @@ DB lives at `data/continuity.db` (gitignored). Run `python index.py` periodicall
 
 Tools exposed:
 
-- `search_sessions(query, limit=10, project=None)` -- FTS5 search with snippets
+- `search_sessions(query, limit=10, project=None, source=None)` -- FTS5 search with snippets
 - `recall_session(session_id, idx_from=None, idx_to=None)` -- full or sliced replay
-- `recent_sessions(n=10, project=None)` -- list recent sessions
-- `index_stats()` -- DB health and size
+- `recent_sessions(n=10, project=None, source=None)` -- list recent sessions
+- `index_stats()` -- DB health broken out by source
+
+The `source` param accepts `"code"` (Claude Code only) or `"chat"` (claude.ai only). Omit for both.
 
 Restart Claude Code to load the server.
 
