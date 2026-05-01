@@ -37,7 +37,7 @@ def _connect():
 
 
 @mcp.tool()
-def search_sessions(query: str, limit: int = 10, project: str | None = None) -> str:
+def search_sessions(query: str, limit: int = 10, project: str | None = None):
     """Full-text search across every Claude Code session ever recorded.
 
     Uses SQLite FTS5. Supports AND/OR/NOT, quoted phrases, prefix* matching.
@@ -99,7 +99,7 @@ def recall_session(
     session_id: str,
     idx_from: int | None = None,
     idx_to: int | None = None,
-) -> str:
+):
     """Replay a session's turns. Accepts full id or unique prefix.
 
     Args:
@@ -146,7 +146,7 @@ def recall_session(
 
 
 @mcp.tool()
-def recent_sessions(n: int = 10, project: str | None = None) -> str:
+def recent_sessions(n: int = 10, project: str | None = None):
     """List the N most recent sessions, optionally filtered by project.
 
     Args:
@@ -183,7 +183,7 @@ def recent_sessions(n: int = 10, project: str | None = None) -> str:
 
 
 @mcp.tool()
-def index_stats() -> str:
+def index_stats():
     """Quick health check of the index. Use this to verify the DB is fresh."""
     conn = _connect()
     s = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
