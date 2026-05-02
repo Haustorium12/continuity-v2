@@ -159,6 +159,8 @@ def index_file(conn, path):
 def main():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
 
     if not PROJECTS_DIR.exists():
@@ -179,6 +181,10 @@ def main():
         except Exception as exc:
             err_count += 1
             print(f"  ERROR {jsonl}: {exc}", file=sys.stderr)
+
+    if new_count > 0:
+        conn.execute("INSERT INTO turns_fts(turns_fts) VALUES('optimize')")
+        conn.commit()
 
     sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     turns = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
