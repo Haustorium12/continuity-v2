@@ -1,7 +1,8 @@
 """continuity-v2 MCP server -- search and recall across every Claude Code session.
 
-Exposes tools backed by the FTS5 index and TEMPORAL edge graph:
+Exposes tools backed by the FTS5 index, TEMPORAL edge graph, and semantic embeddings:
   - search_sessions: full-text search with snippet output
+  - find_similar: semantic similarity search via sentence embeddings + ANN (vec0)
   - thread_recall: BFS over TEMPORAL edges -- returns narrative thread, not just rows
   - recall_session: full or sliced replay of a session by id (or id prefix)
   - recent_sessions: list recent sessions, optionally filtered by project
@@ -17,6 +18,8 @@ import logging
 import os
 import sqlite3
 import sys
+import numpy as np
+import sqlite_vec
 from pathlib import Path
 
 # MCP clients parse stdout as JSON-RPC; keep stderr quiet.
@@ -31,10 +34,24 @@ DB_PATH = Path(__file__).parent / "data" / "continuity.db"
 mcp = FastMCP("continuity-v2")
 
 
+_model = None
+
+
+def _get_model():
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _model
+
+
 def _connect():
     if not DB_PATH.exists():
         raise RuntimeError(f"Index DB not found: {DB_PATH}. Run: python index.py")
     conn = sqlite3.connect(DB_PATH)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
@@ -380,6 +397,76 @@ def fts_rebuild():
     conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM turns_fts").fetchone()[0]
     return f"FTS5 index rebuilt. {count} entries."
+
+
+@mcp.tool()
+def find_similar(query: str, limit: int = 10):
+    """Find turns semantically similar to a natural language query.
+
+    Uses sentence embeddings (all-MiniLM-L6-v2) and ANN search over turn_vecs.
+    Complements search_sessions (keyword FTS5) -- finds turns that are *about*
+    the same topic even when exact words differ.
+
+    Requires embed.py to have been run to build the turn_vecs index.
+
+    Args:
+        query: Natural language query string.
+        limit: Max results (default 10).
+
+    Returns:
+        Plain-text list of semantically similar turns with cosine similarity scores.
+    """
+    conn = _connect()
+
+    has_vecs = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='turn_vecs'"
+    ).fetchone()[0]
+    if not has_vecs:
+        return "turn_vecs table not found. Run: python embed.py"
+
+    vec_count = conn.execute("SELECT COUNT(*) FROM turn_vecs").fetchone()[0]
+    if vec_count == 0:
+        return "No embeddings found. Run: python embed.py"
+
+    model = _get_model()
+    query_vec = model.encode([query], normalize_embeddings=True)[0]
+    query_bytes = query_vec.astype(np.float32).tobytes()
+
+    rows = conn.execute(
+        """
+        SELECT tv.turn_id, tv.distance,
+               t.session_id, t.turn_idx, t.ts, t.role, t.text,
+               s.ai_title, s.project
+        FROM (
+            SELECT turn_id, distance
+            FROM turn_vecs
+            WHERE embedding MATCH ? AND k = ?
+            ORDER BY distance
+        ) tv
+        JOIN turns t ON t.id = tv.turn_id
+        JOIN sessions s ON s.id = t.session_id
+        ORDER BY tv.distance
+        """,
+        (query_bytes, limit),
+    ).fetchall()
+
+    if not rows:
+        return "No similar turns found."
+
+    out = [f"Semantic matches for: {query!r}\n"]
+    for r in rows:
+        cos_sim = 1.0 - (r["distance"] ** 2) / 2.0
+        ts = (r["ts"] or "")[:16].replace("T", " ")
+        title = (r["ai_title"] or "(no title)")[:50]
+        body = (r["text"] or "")[:300]
+        if len(r["text"] or "") > 300:
+            body += "..."
+        out.append(
+            f"[{cos_sim:.3f}] {ts} {r['role']} | {r['project']} | {title}\n"
+            f"  session: {r['session_id']}  turn: {r['turn_idx']}\n"
+            f"  {body}"
+        )
+    return "\n\n".join(out)
 
 
 if __name__ == "__main__":
