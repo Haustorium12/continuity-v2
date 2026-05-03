@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     turn_count INTEGER,
     file_path TEXT,
     file_mtime REAL,
-    indexed_at TEXT
+    indexed_at TEXT,
+    source TEXT DEFAULT 'code'
 );
 
 CREATE TABLE IF NOT EXISTS turns (
@@ -56,6 +57,14 @@ CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
     VALUES ('delete', old.id, old.text, old.role, old.session_id, old.turn_idx, old.ts);
 END;
 """
+
+
+def _ensure_source_column(conn: sqlite3.Connection) -> None:
+    """Add source column to existing DBs built before this column existed."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+    if "source" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN source TEXT DEFAULT 'code'")
+        conn.commit()
 
 
 def extract_text(content):
@@ -162,6 +171,7 @@ def main():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
+    _ensure_source_column(conn)
 
     if not PROJECTS_DIR.exists():
         print(f"Projects dir not found: {PROJECTS_DIR}", file=sys.stderr)
