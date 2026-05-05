@@ -232,6 +232,16 @@ def main():
     session_id = payload.get("session_id", "unknown")
     transcript_path = payload.get("transcript_path", "")
 
+    # Fallback: if Claude Code didn't pass transcript_path (regression from
+    # ~2026-05-02 onward), discover it via session_id rglob. Mirrors the
+    # fallback already present in precompact_save.py.
+    if (not transcript_path or not os.path.exists(transcript_path)) and session_id and session_id != "unknown":
+        projects_dir = Path.home() / ".claude" / "projects"
+        matches = list(projects_dir.rglob("{}.jsonl".format(session_id)))
+        if matches:
+            transcript_path = str(matches[0])
+            log("Discovered transcript via session_id: {}".format(transcript_path))
+
     # Always write checkpoint when transcript is available.
     # PreCompact no longer needs to find the transcript itself -- it relies on this being current.
     if transcript_path and os.path.exists(transcript_path):
@@ -240,7 +250,7 @@ def main():
         else:
             write_checkpoint(transcript_path, session_id, label="periodic")
     elif not transcript_path:
-        log("No transcript_path in Stop payload -- checkpoint not updated.")
+        log("No transcript_path in Stop payload and session_id rglob found nothing -- checkpoint not updated.")
 
     # Check for session-close trigger in last user message
     trigger_word = None
