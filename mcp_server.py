@@ -374,6 +374,159 @@ def thread_recall(
 
 
 @mcp.tool()
+def reindex() -> str:
+    """Re-index all JSONL sessions from ~/.claude/projects/ into the database.
+
+    Runs the same indexing logic as index.py, but from within the MCP server
+    process -- avoiding the cross-process SQLite lock contention that prevents
+    running index.py externally while the MCP server is connected.
+
+    Use this whenever recent sessions are missing from search or recent_sessions.
+    Safe to call at any time; already-indexed sessions are skipped (mtime check).
+
+    Returns:
+        Summary: new/updated count, unchanged count, error count, totals.
+    """
+    import json
+    from pathlib import Path as _Path
+    from datetime import datetime as _datetime
+
+    projects_dir = _Path.home() / ".claude" / "projects"
+    if not projects_dir.exists():
+        return f"Projects dir not found: {projects_dir}"
+
+    write_conn = sqlite3.connect(DB_PATH, timeout=30)
+    write_conn.execute("PRAGMA journal_mode=WAL")
+    write_conn.execute("PRAGMA synchronous=NORMAL")
+
+    def _extract(content):
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text":
+                parts.append(block.get("text", ""))
+            elif kind == "tool_use":
+                name = block.get("name", "")
+                inp = block.get("input") or {}
+                desc = inp.get("description") if isinstance(inp, dict) else ""
+                parts.append(f"[tool:{name}] {desc or ''}".strip())
+            elif kind == "tool_result":
+                c = block.get("content", "")
+                if isinstance(c, list):
+                    c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+                if not isinstance(c, str):
+                    c = str(c)
+                parts.append(f"[result] {c[:500]}")
+        return "\n".join(p for p in parts if p)
+
+    def _index_file(path):
+        sid = path.stem
+        project = path.parent.name
+        mtime = path.stat().st_mtime
+
+        row = write_conn.execute(
+            "SELECT file_mtime FROM sessions WHERE id = ?", (sid,)
+        ).fetchone()
+        if row and row[0] == mtime:
+            return False
+
+        write_conn.execute("DELETE FROM turns WHERE session_id = ?", (sid,))
+        write_conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+
+        ai_title = None
+        cwd = None
+        timestamps = []
+        turn_idx = 0
+
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                kind = obj.get("type")
+                if kind == "ai-title":
+                    ai_title = obj.get("aiTitle")
+                    continue
+                if kind not in ("user", "assistant"):
+                    continue
+                ts = obj.get("timestamp")
+                if ts:
+                    timestamps.append(ts)
+                if not cwd:
+                    cwd = obj.get("cwd")
+                msg = obj.get("message") or {}
+                text = _extract(msg.get("content", ""))
+                if not text:
+                    continue
+                write_conn.execute(
+                    "INSERT INTO turns (session_id, turn_idx, ts, role, text) VALUES (?, ?, ?, ?, ?)",
+                    (sid, turn_idx, ts, kind, text),
+                )
+                turn_idx += 1
+
+        if turn_idx == 0:
+            return False
+
+        started = min(timestamps) if timestamps else None
+        ended = max(timestamps) if timestamps else None
+        write_conn.execute(
+            "INSERT INTO sessions (id, project, ai_title, cwd, started_at, ended_at, "
+            "turn_count, file_path, file_mtime, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, project, ai_title, cwd, started, ended, turn_idx,
+             str(path), mtime, _datetime.now().isoformat()),
+        )
+        write_conn.commit()
+        return True
+
+    new_count = 0
+    skip_count = 0
+    err_count = 0
+    errors = []
+
+    for jsonl in projects_dir.rglob("*.jsonl"):
+        try:
+            if _index_file(jsonl):
+                new_count += 1
+            else:
+                skip_count += 1
+        except Exception as exc:
+            err_count += 1
+            errors.append(f"  {jsonl.name}: {exc}")
+
+    if new_count > 0:
+        write_conn.execute("INSERT INTO turns_fts(turns_fts) VALUES('optimize')")
+        write_conn.commit()
+
+    sessions = write_conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    turns = write_conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    write_conn.close()
+
+    lines = [
+        f"New/updated: {new_count}",
+        f"Unchanged:   {skip_count}",
+        f"Errors:      {err_count}",
+        f"Sessions:    {sessions}",
+        f"Turns:       {turns}",
+    ]
+    if errors:
+        lines.append("\nError details:")
+        lines.extend(errors[:10])
+        if len(errors) > 10:
+            lines.append(f"  ... and {len(errors) - 10} more")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def fts_integrity_check():
     """Run FTS5 integrity-check. Detects index drift between turns and turns_fts.
     Safe to call at any time -- read-only verification."""
