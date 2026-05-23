@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="continuity v2" width="100%">
+</p>
+
 # continuity v2
 
 Long-term memory layer for Claude Code, built on the JSONL session record.
