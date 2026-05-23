@@ -1,9 +1,10 @@
 """
 precompact_save.py
 
-Fires on the PreCompact hook event. Reads the transcript JSONL at
-transcript_path, extracts current session state, and writes a structured
-checkpoint file before compaction runs.
+Fires before Claude Code compacts the context window.
+Reads the transcript JSONL, extracts current session state,
+writes a structured checkpoint to disk so session_start_inject.py
+can restore it after compaction.
 
 Never blocks compaction -- always exits 0.
 """
@@ -16,7 +17,7 @@ from pathlib import Path
 
 # Adapt these to your setup
 CHECKPOINT = Path.home() / ".claude" / "compaction_checkpoint.md"
-LOG = Path.home() / ".claude" / "hooks" / "continuity.log"
+LOG = Path.home() / ".claude" / "hooks" / "precompact.log"
 
 
 def log(msg):
@@ -29,23 +30,23 @@ def log(msg):
 
 
 def extract_text(content):
+    """Pull plain text out of a message content field (str or block list)."""
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
-        parts = [
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ]
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
         return " ".join(parts).strip()
     return ""
 
 
 def parse_transcript(transcript_path):
-    user_msgs = []
-    assistant_msgs = []
-    files_touched = []
-    bash_descs = []
+    user_msgs = []       # [(timestamp, text)]
+    assistant_msgs = []  # [(timestamp, text)]
+    files_touched = []   # unique file paths from Edit/Write tool calls
+    bash_descs = []      # bash operation descriptions
 
     try:
         with open(transcript_path, encoding="utf-8", errors="replace") as f:
@@ -63,12 +64,13 @@ def parse_transcript(transcript_path):
 
                 if mtype == "user":
                     content = obj.get("message", {}).get("content", [])
-                    # Skip pure tool-result messages
-                    if isinstance(content, list) and any(
-                        isinstance(c, dict) and c.get("type") == "tool_result"
-                        for c in content
-                    ):
-                        continue
+                    # Skip messages that are purely tool results
+                    if isinstance(content, list):
+                        if any(
+                            isinstance(c, dict) and c.get("type") == "tool_result"
+                            for c in content
+                        ):
+                            continue
                     text = extract_text(content)
                     if text:
                         user_msgs.append((ts, text))
@@ -81,9 +83,10 @@ def parse_transcript(transcript_path):
                     for block in content:
                         if not isinstance(block, dict):
                             continue
-                        if block.get("type") == "text":
+                        btype = block.get("type")
+                        if btype == "text":
                             text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
+                        elif btype == "tool_use":
                             name = block.get("name", "")
                             inp = block.get("input", {})
                             if name in ("Edit", "Write"):
@@ -91,7 +94,9 @@ def parse_transcript(transcript_path):
                                 if fp and fp not in files_touched:
                                     files_touched.append(fp)
                             elif name == "Bash":
-                                entry = inp.get("description", "") or inp.get("command", "")[:80]
+                                desc = inp.get("description", "")
+                                cmd = inp.get("command", "")
+                                entry = desc if desc else cmd[:80]
                                 if entry:
                                     bash_descs.append(entry)
                     text = "\n".join(text_parts).strip()
@@ -105,45 +110,63 @@ def parse_transcript(transcript_path):
 
 
 def build_checkpoint(payload, user_msgs, assistant_msgs, files_touched, bash_descs):
+    session_id = payload.get("session_id", "unknown")
+    cwd = payload.get("cwd", "")
+    trigger = payload.get("trigger", "unknown")
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M")
+
     lines = [
         "=== COMPACTION CHECKPOINT ===",
-        "Session: {}".format(payload.get("session_id", "")),
-        "Saved:   {}".format(datetime.now().strftime("%Y-%m-%dT%H:%M")),
-        "Trigger: {}   CWD: {}".format(payload.get("trigger", ""), payload.get("cwd", "")),
+        "Session: {}".format(session_id),
+        "Saved:   {}".format(now),
+        "Trigger: {}".format(trigger),
+        "CWD:     {}".format(cwd),
         "",
-        "== RECENT USER MESSAGES (last 5) ==",
     ]
-    for ts, text in user_msgs[-5:]:
-        lines.append("  [{}] {}".format(ts, text[:200].replace("\n", " ")))
 
-    lines += ["", "== LAST ASSISTANT RESPONSE =="]
+    lines.append("== RECENT USER MESSAGES (last 5) ==")
+    for ts, text in user_msgs[-5:]:
+        short = text[:200].replace("\n", " ")
+        lines.append("  [{}] {}".format(ts, short))
+    lines.append("")
+
+    lines.append("== LAST ASSISTANT RESPONSE ==")
     if assistant_msgs:
         ts, text = assistant_msgs[-1]
-        lines += ["[{}]".format(ts), text[:1000]]
+        lines.append("[{}]".format(ts))
+        # Cap at 1000 chars -- enough to know where we were
+        lines.append(text[:1000])
     else:
         lines.append("(none recorded)")
+    lines.append("")
 
     if files_touched:
-        lines += ["", "== FILES TOUCHED THIS SESSION =="]
-        lines += ["  {}".format(fp) for fp in files_touched[-20:]]
+        lines.append("== FILES TOUCHED THIS SESSION ==")
+        for fp in files_touched[-20:]:
+            lines.append("  {}".format(fp))
+        lines.append("")
 
     if bash_descs:
-        lines += ["", "== RECENT OPERATIONS =="]
-        lines += ["  - {}".format(d[:100]) for d in bash_descs[-10:]]
+        lines.append("== RECENT OPERATIONS ==")
+        for desc in bash_descs[-10:]:
+            lines.append("  - {}".format(desc[:100]))
+        lines.append("")
 
-    lines.append("\n=== END CHECKPOINT ===")
+    lines.append("=== END CHECKPOINT ===")
     return "\n".join(lines)
 
 
 def main():
     try:
-        payload = json.loads(sys.stdin.read())
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         payload = {}
 
+    session_id = payload.get("session_id", "unknown")
     transcript_path = payload.get("transcript_path", "")
-    log("PreCompact fired. trigger={} transcript={}".format(
-        payload.get("trigger", "?"), transcript_path
+    log("PreCompact fired. session={} trigger={} transcript={}".format(
+        session_id, payload.get("trigger", "?"), transcript_path
     ))
 
     if not transcript_path or not os.path.exists(transcript_path):
@@ -166,18 +189,19 @@ def main():
         sys.exit(0)
 
     user_msgs, assistant_msgs, files_touched, bash_descs = parse_transcript(transcript_path)
+
     checkpoint = build_checkpoint(payload, user_msgs, assistant_msgs, files_touched, bash_descs)
 
     try:
         CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
         CHECKPOINT.write_text(checkpoint, encoding="utf-8")
-        log("Checkpoint written. users={} files={} ops={}".format(
-            len(user_msgs), len(files_touched), len(bash_descs)
+        log("Checkpoint written. users={} assistants={} files={} ops={}".format(
+            len(user_msgs), len(assistant_msgs), len(files_touched), len(bash_descs)
         ))
     except Exception as e:
-        log("Write failed: {}".format(e))
+        log("Failed to write checkpoint: {}".format(e))
 
-    # Never block compaction
+    # Never return a block decision -- let compaction proceed
     sys.exit(0)
 
 
