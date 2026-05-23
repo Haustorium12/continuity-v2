@@ -48,11 +48,13 @@ Wire it into the existing `claude-memory` MCP (port 8200) or stand alone.
 - `recall_session(session_id, range="full")` — return full or sliced session
 - `recent_sessions(n=10)` — list recent sessions with first/last user message
 
-### Stage 3 — Semantic recall (later)
+### Stage 3 — Semantic recall
 
-Embed each turn, store vectors alongside FTS5. Hybrid search: literal + semantic.
+Sentence embeddings + SIMILAR_TO edges. Hybrid search: literal + semantic.
 
 For when the words don't match but the concept does ("when did we talk about the thread-home problem" should match conversations about "Hal", "50 First Dates", "Alice in Wonderland").
+
+`find_similar(session_id)` — find semantically similar sessions via embedding distance.
 
 ### Stage 4 — Auto-tagging (later)
 
@@ -68,7 +70,7 @@ The "I told you this two weeks ago" problem disappears. The episodic record was 
 
 ## Status
 
-**Stage 1 + Stage 2 complete.** 1,026 sessions / 76,010 turns. DB: 57.8 MB.
+**Stages 1, 2, and 3 complete.** Sessions grow with every conversation; DB starts around 50 MB.
 
 Two sources in one DB:
 - **Claude Code sessions** -- JSONL files under `~/.claude/projects/`
@@ -92,13 +94,17 @@ To get your claude.ai chat export: claude.ai -> Settings -> Export data.
 
 ### Stage 2 -- MCP server
 
-`mcp_server.py` exposes the index as a stdio MCP server. Add to `~/.claude/settings.json`:
+`mcp_server.py` exposes the index as a stdio MCP server. Add to `~/.claude.json`
+(the primary MCP config for Claude Code — **not** `~/.claude/settings.json`):
 
 ```json
-"continuity-v2": {
-  "command": "C:\\Python314\\python.exe",
-  "args": ["C:\\dev\\continuity-v2\\mcp_server.py"],
-  "env": { "PYTHONIOENCODING": "utf-8" }
+"mcpServers": {
+  "continuity-v2": {
+    "type": "stdio",
+    "command": "python",
+    "args": ["/path/to/continuity-v2/mcp_server.py"],
+    "env": { "PYTHONIOENCODING": "utf-8" }
+  }
 }
 ```
 
@@ -114,37 +120,21 @@ The `source` param accepts `"code"` (Claude Code only) or `"chat"` (claude.ai on
 Restart Claude Code to load the server.
 
 
-## Hooks: source vs. installed
+## Hooks: installation
 
-The `hooks/` directory in this repo is the **template**. After installing into `~/.claude/hooks/`, expect to **customize a handful of paths in each script** to match your machine, then leave the installed copies alone.
+Copy the four scripts from `hooks/` to `~/.claude/hooks/`:
 
-### What gets customized post-install
+```
+cp hooks/precompact_save.py        ~/.claude/hooks/
+cp hooks/session_start_inject.py   ~/.claude/hooks/
+cp hooks/stop_hook_checkpoint.py   ~/.claude/hooks/
+cp hooks/sse_proxy.py              ~/.claude/hooks/
+```
 
-| Script | Constant | Source (template) | Installed (typical) |
-|---|---|---|---|
-| `precompact_save.py` | `LOG` | `~/.claude/hooks/continuity.log` | site-specific log path (e.g. `precompact.log`) |
-| `session_start_inject.py` | `PROJECT_STATE` | `~/.claude/memory/project_current_state.md` | wherever your real sticky-note file lives |
-| `session_start_inject.py` | `LOG` | `~/.claude/hooks/continuity.log` | site-specific (`session_start.log`) |
-| `stop_hook_checkpoint.py` | `LOG` | shared `sse_proxy.log` | usually unchanged |
-| `sse_proxy.py` | port, log path | `9099`, shared log | usually unchanged |
-
-### Do not blindly `cp source/* installed/`
-
-This will overwrite your customized `PROJECT_STATE`, `LOG`, and any other site-specific paths, silently breaking session-start injection and log routing. Symptoms include:
-
-- `compaction_checkpoint.md` reads stale data despite hooks firing
-- `session_start_inject.py` logs "checkpoint missing" even though one exists
-- Logs vanish into a path that doesn't exist or isn't being tailed
-
-### Updating from source after a bug fix
-
-Surgical only. When this repo lands a fix to a hook:
-
-1. `git diff old new -- hooks/<script>.py` to see what changed
-2. Apply the substantive logic change to the installed copy by hand (or with a targeted patch)
-3. Leave site-customized constants alone
-
-For the 2026-05-05 `stop_hook_checkpoint.py` `session_id` rglob fallback: the change is in `main()` between `transcript_path = payload.get(...)` and the `if transcript_path and os.path.exists(transcript_path):` block. Mirror it into the installed copy without touching the constants at the top of the file.
+All paths use `Path.home()` and resolve correctly on any platform. The one
+constant you may want to change is `PROJECT_STATE` in `session_start_inject.py`
+— set it to your project's sticky-note file if it lives somewhere other than
+`~/.claude/memory/project_current_state.md`, or `None` to disable resume injection.
 
 
 ## License
