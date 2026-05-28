@@ -20,6 +20,7 @@ import sqlite3
 import sys
 import numpy as np
 import sqlite_vec
+from datetime import datetime as _dt, timezone as _tz
 from pathlib import Path
 
 # MCP clients parse stdout as JSON-RPC; keep stderr quiet.
@@ -32,6 +33,29 @@ from mcp.server.fastmcp import FastMCP
 DB_PATH = Path(__file__).parent / "data" / "continuity.db"
 
 mcp = FastMCP("continuity-v2")
+
+# ---------------------------------------------------------------------------
+# Hybrid scoring weights for find_similar
+# final_score = W_SEMANTIC*cos_sim + W_RECENCY*recency + W_COMPLEXITY*complexity
+# ---------------------------------------------------------------------------
+_W_SEMANTIC          = 0.7
+_W_RECENCY           = 0.2
+_W_COMPLEXITY        = 0.1
+_RECENCY_DECAY_DAYS  = 365   # linear falloff; 0.0 at this many days old
+_COMPLEXITY_MAX_TURNS = 50   # session with this many turns scores 1.0 complexity
+
+
+def _recency_score(started_at_str: str | None) -> float:
+    """Linear recency decay: 1.0 right now, 0.0 at RECENCY_DECAY_DAYS. 0.5 if unknown."""
+    if not started_at_str:
+        return 0.5
+    try:
+        started = _dt.fromisoformat(started_at_str.replace("Z", "+00:00"))
+        now = _dt.now(_tz.utc) if started.tzinfo else _dt.now()
+        days = max(0, (now - started).days)
+        return max(0.0, 1.0 - days / _RECENCY_DECAY_DAYS)
+    except Exception:
+        return 0.5
 
 
 _model = None
@@ -234,12 +258,47 @@ def index_stats():
     earliest = conn.execute("SELECT MIN(started_at) AS m FROM sessions").fetchone()["m"]
     latest = conn.execute("SELECT MAX(ended_at) AS m FROM sessions").fetchone()["m"]
     size_mb = DB_PATH.stat().st_size / (1024 * 1024)
+
+    # Embedding coverage
+    has_vecs = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='turn_vecs'"
+    ).fetchone()[0]
+    if has_vecs:
+        embedded = conn.execute("SELECT COUNT(*) FROM turn_vecs").fetchone()[0]
+        embeddable = conn.execute(
+            "SELECT COUNT(*) FROM turns WHERE role IN ('user','assistant')"
+            " AND length(text) >= 30"
+            " AND text NOT LIKE '[tool:%'"
+            " AND text NOT LIKE '[result]%'"
+        ).fetchone()[0]
+        pct = (embedded / embeddable * 100) if embeddable else 0.0
+        embed_line = f"Embeddings:    {embedded:,} / {embeddable:,} ({pct:.1f}%)"
+    else:
+        embed_line = "Embeddings:    not built (run: python embed.py)"
+
+    # SIMILAR_TO edges
+    has_edges = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='edges'"
+    ).fetchone()[0]
+    if has_edges:
+        sim_edges = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE edge_type='SIMILAR_TO'"
+        ).fetchone()[0]
+        temp_edges = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE edge_type='TEMPORAL'"
+        ).fetchone()[0]
+        edges_line = f"Edges:         TEMPORAL={temp_edges:,}  SIMILAR_TO={sim_edges:,}"
+    else:
+        edges_line = "Edges:         not built"
+
     return (
         f"DB:            {DB_PATH} ({size_mb:.1f} MB)\n"
         f"Sessions:      {s} (code: {code_s}, chat: {chat_s})\n"
-        f"Turns:         {t}\n"
+        f"Turns:         {t:,}\n"
         f"Earliest:      {earliest}\n"
-        f"Latest:        {latest}"
+        f"Latest:        {latest}\n"
+        f"{embed_line}\n"
+        f"{edges_line}"
     )
 
 
@@ -556,7 +615,12 @@ def fts_rebuild():
 def find_similar(query: str, limit: int = 10):
     """Find turns semantically similar to a natural language query.
 
-    Uses sentence embeddings (all-MiniLM-L6-v2) and ANN search over turn_vecs.
+    Uses sentence embeddings (all-MiniLM-L6-v2) + ANN search, re-ranked by a
+    hybrid score: 0.7*semantic + 0.2*recency + 0.1*complexity.
+
+    Recency decay: linear, full decay at 365 days old.
+    Complexity: session turn count (50 turns = 1.0). Rewards dense sessions.
+
     Complements search_sessions (keyword FTS5) -- finds turns that are *about*
     the same topic even when exact words differ.
 
@@ -567,7 +631,8 @@ def find_similar(query: str, limit: int = 10):
         limit: Max results (default 10).
 
     Returns:
-        Plain-text list of semantically similar turns with cosine similarity scores.
+        Plain-text list of turns ranked by hybrid score. Each result shows the
+        hybrid score, plus the semantic/recency/complexity components.
     """
     conn = _connect()
 
@@ -585,11 +650,15 @@ def find_similar(query: str, limit: int = 10):
     query_vec = model.encode([query], normalize_embeddings=True)[0]
     query_bytes = query_vec.astype(np.float32).tobytes()
 
+    # Over-fetch candidates so re-ranking can surface recent/complex hits
+    # that may not have the raw top cosine score.
+    candidates = limit * 3
+
     rows = conn.execute(
         """
         SELECT tv.turn_id, tv.distance,
                t.session_id, t.turn_idx, t.ts, t.role, t.text,
-               s.ai_title, s.project
+               s.ai_title, s.project, s.started_at, s.turn_count
         FROM (
             SELECT turn_id, distance
             FROM turn_vecs
@@ -600,22 +669,34 @@ def find_similar(query: str, limit: int = 10):
         JOIN sessions s ON s.id = t.session_id
         ORDER BY tv.distance
         """,
-        (query_bytes, limit),
+        (query_bytes, candidates),
     ).fetchall()
 
     if not rows:
         return "No similar turns found."
 
-    out = [f"Semantic matches for: {query!r}\n"]
+    # Hybrid re-ranking
+    scored = []
     for r in rows:
-        cos_sim = 1.0 - (r["distance"] ** 2) / 2.0
-        ts = (r["ts"] or "")[:16].replace("T", " ")
+        cos_sim  = 1.0 - (r["distance"] ** 2) / 2.0
+        recency  = _recency_score(r["started_at"])
+        cplx     = min(1.0, (r["turn_count"] or 0) / _COMPLEXITY_MAX_TURNS)
+        hybrid   = _W_SEMANTIC * cos_sim + _W_RECENCY * recency + _W_COMPLEXITY * cplx
+        scored.append((hybrid, cos_sim, recency, cplx, r))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    scored = scored[:limit]
+
+    out = [f"Semantic matches for: {query!r}  (hybrid = 0.7*sem + 0.2*rec + 0.1*cplx)\n"]
+    for hybrid, cos_sim, recency, cplx, r in scored:
+        ts    = (r["ts"] or "")[:16].replace("T", " ")
         title = (r["ai_title"] or "(no title)")[:50]
-        body = (r["text"] or "")[:300]
+        body  = (r["text"] or "")[:300]
         if len(r["text"] or "") > 300:
             body += "..."
         out.append(
-            f"[{cos_sim:.3f}] {ts} {r['role']} | {r['project']} | {title}\n"
+            f"[{hybrid:.3f}] sem={cos_sim:.3f} rec={recency:.2f} cplx={cplx:.2f}"
+            f" | {ts} {r['role']} | {r['project']} | {title}\n"
             f"  session: {r['session_id']}  turn: {r['turn_idx']}\n"
             f"  {body}"
         )
