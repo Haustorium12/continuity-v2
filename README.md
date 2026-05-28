@@ -58,7 +58,17 @@ Sentence embeddings + SIMILAR_TO edges. Hybrid search: literal + semantic.
 
 For when the words don't match but the concept does ("when did we talk about the thread-home problem" should match conversations about "Hal", "50 First Dates", "Alice in Wonderland").
 
-`find_similar(session_id)` — find semantically similar sessions via embedding distance.
+`find_similar(query, limit=10)` — find semantically similar turns via ANN search over
+`all-MiniLM-L6-v2` embeddings, re-ranked by a hybrid score:
+
+```
+score = 0.7 * semantic_similarity
+      + 0.2 * recency_decay       # linear, full decay at 365 days
+      + 0.1 * complexity_bonus    # session turn count, normalized to 50 turns
+```
+
+Build: `python embed.py` (idempotent — skips turns already embedded), then
+`python wire_similar.py` to wire `SIMILAR_TO` edges between turn pairs with cosine ≥ 0.85.
 
 ### Stage 4 — Auto-tagging (later)
 
@@ -74,7 +84,7 @@ The "I told you this two weeks ago" problem disappears. The episodic record was 
 
 ## Status
 
-**Stages 1, 2, and 3 complete.** Sessions grow with every conversation; DB starts around 50 MB.
+**Stages 1, 2, 3, and 3A complete.** Sessions grow with every conversation; DB starts around 50 MB.
 
 Two sources in one DB:
 - **Claude Code sessions** -- JSONL files under `~/.claude/projects/`
@@ -83,6 +93,9 @@ Two sources in one DB:
 ```
 python index.py                              # index Claude Code sessions (incremental)
 python chat_index.py <path/conversations.json>  # index claude.ai chat export (incremental)
+python embed.py                              # build/update sentence embeddings (idempotent)
+python wire_edges.py                         # wire TEMPORAL edges between turns
+python wire_similar.py                       # wire SIMILAR_TO edges from embeddings (run after embed.py)
 python stats.py                              # health + recent sessions
 python search.py "<query>"                   # FTS5 search across all sessions
 python recall.py <id>                        # full or sliced session by id
@@ -115,9 +128,12 @@ To get your claude.ai chat export: claude.ai -> Settings -> Export data.
 Tools exposed:
 
 - `search_sessions(query, limit=10, project=None, source=None)` -- FTS5 search with snippets
+- `find_similar(query, limit=10)` -- semantic search, hybrid-scored (0.7 sem + 0.2 recency + 0.1 complexity)
+- `thread_recall(query, ...)` -- BFS over TEMPORAL edges; returns narrative thread not just rows
 - `recall_session(session_id, idx_from=None, idx_to=None)` -- full or sliced replay
 - `recent_sessions(n=10, project=None, source=None)` -- list recent sessions
-- `index_stats()` -- DB health broken out by source
+- `index_stats()` -- DB health, session/turn counts, embedding coverage, edge counts
+- `reindex()` -- re-index new sessions without restarting the server
 
 The `source` param accepts `"code"` (Claude Code only) or `"chat"` (claude.ai only). Omit for both.
 
