@@ -66,6 +66,7 @@ def inject(context_text):
     """Print the additionalContext JSON and exit."""
     output = {
         "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
             "additionalContext": context_text
         }
     }
